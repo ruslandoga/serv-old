@@ -151,9 +151,7 @@ defmodule Serv.Acceptor do
       end
 
     # TODO optimise (with benches)
-    %{path: path} = parsed = :uri_string.parse(path)
-    segments = :binary.split(path, "/", [:global])
-    path_info = for segment <- segments, segment != "", do: segment
+    {path, path_info, query_string} = split_path_qs(path)
 
     # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
     {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
@@ -176,8 +174,7 @@ defmodule Serv.Acceptor do
       host: host,
       port: port,
       remote_ip: remote_ip,
-      # TODO
-      query_string: Map.get(parsed, :query, ""),
+      query_string: query_string,
       req_headers: req_headers,
       request_path: path,
       scheme: :http,
@@ -198,4 +195,20 @@ defmodule Serv.Acceptor do
       nil = not_found -> not_found
     end
   end
+
+  defp split_path_qs(path) do
+    case :binary.split(path, "?") do
+      [path] -> {path, split_path(path), ""}
+      [path, query_string] -> {path, split_path(path), query_string}
+    end
+  end
+
+  defp split_path(path) do
+    path |> :binary.split("/", [:global]) |> clean_segments()
+  end
+
+  @compile inline: [clean_segments: 1]
+  defp clean_segments(["" | rest]), do: clean_segments(rest)
+  defp clean_segments([segment | rest]), do: [segment | clean_segments(rest)]
+  defp clean_segments([] = done), do: done
 end
