@@ -1,13 +1,40 @@
+```elixir
+defmodule OkPlug do
+  def init(opts), do: opts
+  def call(conn, _opts) do
+    Plug.Conn.send_resp(conn, 200, """
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <title>Welcome to nginx!</title>
+    <style>
+    html { color-scheme: light dark; }
+    body { width: 35em; margin: 0 auto;
+    font-family: Tahoma, Verdana, Arial, sans-serif; }
+    </style>
+    </head>
+    <body>
+    <h1>Welcome to nginx!</h1>
+    <p>If you see this page, the nginx web server is successfully installed and
+    working. Further configuration is required.</p>
+
+    <p>For online documentation and support please refer to
+    <a href="http://nginx.org/">nginx.org</a>.<br/>
+    Commercial support is available at
+    <a href="http://nginx.com/">nginx.com</a>.</p>
+
+    <p><em>Thank you for using nginx.</em></p>
+    </body>
+    </html>
+    """)
+  end
+end
+```
+
 ### Cowboy
 
 ```elixir
 Mix.install [:plug_cowboy]
-
-defmodule OkPlug do
-  def init(opts), do: opts
-  def call(conn, _opts), do: Plug.Conn.send_resp(conn, 200, "Ok.")
-end
-
 Plug.Cowboy.http(OkPlug, [], port: 8001)
 ```
 
@@ -16,23 +43,17 @@ $ wrk -t64 -c128 -d10s http://localhost:8001
 Running 10s test @ http://localhost:8001
   64 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     1.89ms    4.97ms 126.43ms   97.11%
-    Req/Sec     1.66k   229.15     2.99k    76.19%
-  1064602 requests in 10.10s, 148.25MB read
-Requests/sec: 105355.41
-Transfer/sec:     14.67MB
+    Latency     2.09ms    5.82ms 124.79ms   96.58%
+    Req/Sec     1.67k   245.96     2.87k    78.07%
+  1069807 requests in 10.10s, 775.41MB read
+Requests/sec: 105876.41
+Transfer/sec:     76.74MB
 ```
 
 ### Bandit
 
 ```elixir
 Mix.install [:bandit]
-
-defmodule OkPlug do
-  def init(opts), do: opts
-  def call(conn, _opts), do: Plug.Conn.send_resp(conn, 200, "Ok.")
-end
-
 Bandit.start_link(plug: OkPlug, options: [port: 8002])
 ```
 
@@ -41,23 +62,17 @@ $ wrk -t64 -c128 -d10s http://localhost:8002
 Running 10s test @ http://localhost:8002
   64 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     4.71ms   12.94ms 165.50ms   92.66%
-    Req/Sec     1.92k   789.88     6.51k    75.16%
-  1228227 requests in 10.10s, 152.27MB read
-Requests/sec: 121552.22
-Transfer/sec:     15.07MB
+    Latency     5.01ms   12.84ms 169.80ms   91.45%
+    Req/Sec     1.97k   842.30     7.55k    74.69%
+  1262405 requests in 10.10s, 0.87GB read
+Requests/sec: 124936.14
+Transfer/sec:     88.65MB
 ```
 
 ### Serv
 
 ```elixir
 Mix.install [{:serv, github: "ruslandoga/serv"}]
-
-defmodule OkPlug do
-  def init(opts), do: opts
-  def call(conn, _opts), do: Plug.Conn.send_resp(conn, 200, "Ok.")
-end
-
 Serv.start_link(plug: OkPlug, port: 8003)
 ```
 
@@ -66,9 +81,9 @@ $ wrk -t64 -c128 -d10s http://localhost:8003
 Running 10s test @ http://localhost:8003
   64 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    13.22ms   30.32ms 250.54ms   87.77%
-    Req/Sec     2.19k     1.52k   28.11k    79.57%
-  1385295 requests in 10.10s, 154.57MB read
-Requests/sec: 137149.37
-Transfer/sec:     15.30MB
+    Latency     3.95ms   11.53ms 232.61ms   93.06%
+    Req/Sec     2.13k   841.13     8.52k    76.12%
+  1364688 requests in 10.10s, 0.93GB read
+Requests/sec: 135058.75
+Transfer/sec:     94.15MB
 ```

@@ -6,7 +6,7 @@ defmodule OkPlug do
   def init(opts), do: opts
 
   @impl true
-  def call(conn, opts) do
+  def call(conn, _opts) do
     Plug.Conn.send_resp(conn, 200, """
     <!DOCTYPE html>
     <html>
