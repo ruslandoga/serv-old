@@ -53,6 +53,13 @@ defmodule Serv.Acceptor do
     # TODO opts
     conn = plug.call(conn, [])
 
+    # TODO
+    receive do
+      {:plug_conn, :sent} -> :ok
+    after
+      0 -> :ok
+    end
+
     case elem(conn.adapter, 1) do
       Adapter.state(close?: true) -> :close
       Adapter.state(close?: false, buffer: buffer) -> {:keepalive, buffer}

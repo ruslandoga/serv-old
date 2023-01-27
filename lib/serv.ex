@@ -30,7 +30,7 @@ defmodule Serv do
 
     ip = Keyword.get(opts, :ip, {127, 0, 0, 1})
     port = Keyword.get(opts, :port, 0)
-    min_acceptors = opts[:min_acceptors] || 20
+    min_acceptors = opts[:min_acceptors] || 100
 
     timeouts = opts[:timeouts] || []
 
@@ -44,8 +44,10 @@ defmodule Serv do
     {:ok, socket} = :socket.open(:inet, :stream, :tcp)
 
     :ok = :socket.setopt(socket, {:socket, :reuseaddr}, true)
+    :ok = :socket.setopt(socket, {:socket, :linger}, %{onoff: true, linger: 30})
+    :ok = :socket.setopt(socket, {:tcp, :nodelay}, true)
     :ok = :socket.bind(socket, %{family: :inet, port: port, addr: ip})
-    :ok = :socket.listen(socket, opts[:backlog] || 32768)
+    :ok = :socket.listen(socket, opts[:backlog] || 1024)
 
     acceptors = :ets.new(:acceptors, [:private, :set])
     state = state(socket: socket, acceptors: acceptors, timeouts: timeouts, plug: plug)
