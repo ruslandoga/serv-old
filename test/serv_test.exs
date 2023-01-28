@@ -23,7 +23,6 @@ defmodule ServTest do
     assert [200, headers | data] = recv(conn)
 
     assert headers == [
-             {"connection", "keep-alive"},
              {"content-length", "3"},
              {"cache-control", "max-age=0, private, must-revalidate"}
            ]

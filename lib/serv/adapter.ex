@@ -11,7 +11,7 @@ defmodule Serv.Adapter do
 
     {connection, close?} = ensure_connection(version, headers, req_headers)
     headers = [connection, ensure_content_length(headers, body) | headers]
-    response = ["HTTP/1.1 ", status(status), "\r\n", encode_headers(headers), "\r\n" | body]
+    response = [http_line(status), encode_headers(headers) | body]
 
     # TODO telemetry
     :socket.send(socket, response)
@@ -26,7 +26,7 @@ defmodule Serv.Adapter do
 
     {connection, close?} = ensure_connection(version, headers, req_headers)
     headers = [connection | headers]
-    response = ["HTTP/1.1 ", status(status), "\r\n", encode_headers(headers) | "\r\n"]
+    response = [http_line(status) | encode_headers(headers)]
 
     with {:ok, fd} <- :file.open(file, [:read, :raw, :binary]) do
       try do
@@ -50,7 +50,7 @@ defmodule Serv.Adapter do
 
     {connection, _close?} = ensure_connection(version, headers, req_headers)
     headers = [{"transfer-encoding", "chunked"}, connection | headers]
-    response = ["HTTP/1.1 ", status(status), "\r\n", encode_headers(headers) | "\r\n"]
+    response = [http_line(status) | encode_headers(headers)]
 
     :socket.send(socket, response)
 
@@ -137,7 +137,7 @@ defmodule Serv.Adapter do
         {"sec-websocket-accept", challenge}
       ]
 
-      response = ["HTTP/1.1 ", status(101), "\r\n", encode_headers(headers) | "\r\n"]
+      response = [http_line(101) | encode_headers(headers)]
 
       with :ok <- :socket.send(socket, response) do
         {:ok, state}
@@ -176,20 +176,20 @@ defmodule Serv.Adapter do
 
   defp connection({1, 1}, req_headers) do
     case List.keyfind(req_headers, "connection", 0) do
-      nil -> {{"connection", "keep-alive"}, false}
+      nil -> {[], false}
       {_, connection} = h -> {h, String.downcase(connection) == "close"}
     end
   end
 
   defp connection({1, 0}, req_headers) do
     case List.keyfind(req_headers, "connection", 0) do
-      nil -> "close"
+      nil -> {[], true}
       {_, connection} = h -> {h, String.downcase(connection) == "close"}
     end
   end
 
   defp connection({0, 9}, _req_headers) do
-    {{"connection", "close"}, true}
+    {[], true}
   end
 
   defp ensure_content_length(headers, body) do
@@ -199,75 +199,83 @@ defmodule Serv.Adapter do
     end
   end
 
+  @dialyzer {:no_improper_lists, encode_headers: 1}
   defp encode_headers([{k, v} | rest]) do
     [encode_value(k), ": ", encode_value(v), "\r\n" | encode_headers(rest)]
   end
 
   defp encode_headers([[] | rest]), do: encode_headers(rest)
-  defp encode_headers([] = done), do: done
+  defp encode_headers([]), do: "\r\n"
 
   defp encode_value(i) when is_integer(i), do: Integer.to_string(i)
   defp encode_value(b) when is_binary(b), do: b
   defp encode_value(l) when is_list(l), do: List.to_string(l)
 
-  defp status(100), do: "100 Continue"
-  defp status(101), do: "101 Switching Protocols"
-  defp status(102), do: "102 Processing"
-  defp status(200), do: "200 OK"
-  defp status(201), do: "201 Created"
-  defp status(202), do: "202 Accepted"
-  defp status(203), do: "203 Non-Authoritative Information"
-  defp status(204), do: "204 No Content"
-  defp status(205), do: "205 Reset Content"
-  defp status(206), do: "206 Partial Content"
-  defp status(207), do: "207 Multi-Status"
-  defp status(226), do: "226 IM Used"
-  defp status(300), do: "300 Multiple Choices"
-  defp status(301), do: "301 Moved Permanently"
-  defp status(302), do: "302 Found"
-  defp status(303), do: "303 See Other"
-  defp status(304), do: "304 Not Modified"
-  defp status(305), do: "305 Use Proxy"
-  defp status(306), do: "306 Switch Proxy"
-  defp status(307), do: "307 Temporary Redirect"
-  defp status(400), do: "400 Bad Request"
-  defp status(401), do: "401 Unauthorized"
-  defp status(402), do: "402 Payment Required"
-  defp status(403), do: "403 Forbidden"
-  defp status(404), do: "404 Not Found"
-  defp status(405), do: "405 Method Not Allowed"
-  defp status(406), do: "406 Not Acceptable"
-  defp status(407), do: "407 Proxy Authentication Required"
-  defp status(408), do: "408 Request Timeout"
-  defp status(409), do: "409 Conflict"
-  defp status(410), do: "410 Gone"
-  defp status(411), do: "411 Length Required"
-  defp status(412), do: "412 Precondition Failed"
-  defp status(413), do: "413 Request Entity Too Large"
-  defp status(414), do: "414 Request-URI Too Long"
-  defp status(415), do: "415 Unsupported Media Type"
-  defp status(416), do: "416 Requested Range Not Satisfiable"
-  defp status(417), do: "417 Expectation Failed"
-  defp status(418), do: "418 I'm a teapot"
-  defp status(422), do: "422 Unprocessable Entity"
-  defp status(423), do: "423 Locked"
-  defp status(424), do: "424 Failed Dependency"
-  defp status(425), do: "425 Unordered Collection"
-  defp status(426), do: "426 Upgrade Required"
-  defp status(428), do: "428 Precondition Required"
-  defp status(429), do: "429 Too Many Requests"
-  defp status(431), do: "431 Request Header Fields Too Large"
-  defp status(500), do: "500 Internal Server Error"
-  defp status(501), do: "501 Not Implemented"
-  defp status(502), do: "502 Bad Gateway"
-  defp status(503), do: "503 Service Unavailable"
-  defp status(504), do: "504 Gateway Timeout"
-  defp status(505), do: "505 HTTP Version Not Supported"
-  defp status(506), do: "506 Variant Also Negotiates"
-  defp status(507), do: "507 Insufficient Storage"
-  defp status(510), do: "510 Not Extended"
-  defp status(511), do: "511 Network Authentication Required"
-  defp status(b) when is_binary(b), do: b
+  statuses = [
+    {200, "200 OK"},
+    {404, "404 Not Found"},
+    {500, "500 Internal Server Error"},
+    {400, "400 Bad Request"},
+    {401, "401 Unauthorized"},
+    {403, "403 Forbidden"},
+    {429, "429 Too Many Requests"},
+    {201, "201 Created"},
+    # ----------------------------------------
+    {100, "100 Continue"},
+    {101, "101 Switching Protocols"},
+    {102, "102 Processing"},
+    {202, "202 Accepted"},
+    {203, "203 Non-Authoritative Information"},
+    {204, "204 No Content"},
+    {205, "205 Reset Content"},
+    {206, "206 Partial Content"},
+    {207, "207 Multi-Status"},
+    {226, "226 IM Used"},
+    {300, "300 Multiple Choices"},
+    {301, "301 Moved Permanently"},
+    {302, "302 Found"},
+    {303, "303 See Other"},
+    {304, "304 Not Modified"},
+    {305, "305 Use Proxy"},
+    {306, "306 Switch Proxy"},
+    {307, "307 Temporary Redirect"},
+    {402, "402 Payment Required"},
+    {405, "405 Method Not Allowed"},
+    {406, "406 Not Acceptable"},
+    {407, "407 Proxy Authentication Required"},
+    {408, "408 Request Timeout"},
+    {409, "409 Conflict"},
+    {410, "410 Gone"},
+    {411, "411 Length Required"},
+    {412, "412 Precondition Failed"},
+    {413, "413 Request Entity Too Large"},
+    {414, "414 Request-URI Too Long"},
+    {415, "415 Unsupported Media Type"},
+    {416, "416 Requested Range Not Satisfiable"},
+    {417, "417 Expectation Failed"},
+    {418, "418 I'm a teapot"},
+    {422, "422 Unprocessable Entity"},
+    {423, "423 Locked"},
+    {424, "424 Failed Dependency"},
+    {425, "425 Unordered Collection"},
+    {426, "426 Upgrade Required"},
+    {428, "428 Precondition Required"},
+    {431, "431 Request Header Fields Too Large"},
+    {501, "501 Not Implemented"},
+    {502, "502 Bad Gateway"},
+    {503, "503 Service Unavailable"},
+    {504, "504 Gateway Timeout"},
+    {505, "505 HTTP Version Not Supported"},
+    {506, "506 Variant Also Negotiates"},
+    {507, "507 Insufficient Storage"},
+    {510, "510 Not Extended"},
+    {511, "511 Network Authentication Required"}
+  ]
+
+  for {code, status} <- statuses do
+    def status(unquote(code)), do: unquote(status)
+    defp http_line(unquote(code)), do: unquote("HTTP/1.1 " <> status <> "\r\n")
+  end
 
   defp maybe_send_continue(socket, req_headers) do
     with {_, "100-continue"} <- List.keyfind(req_headers, "expect", 0) do
