@@ -38,32 +38,31 @@ defmodule Serv.Acceptor do
   @doc false
   def keepalive_loop(socket, buffer, timeouts, plug) do
     case __MODULE__.handle_request(socket, buffer, timeouts, plug) do
-      {:keepalive, buffer} -> __MODULE__.keepalive_loop(socket, buffer, timeouts, plug)
-      :close -> :socket.close(socket)
+      Adapter.req(connection: "close") -> :socket.close(socket)
+      Adapter.req(buffer: buffer) -> __MODULE__.keepalive_loop(socket, buffer, timeouts, plug)
     end
   end
 
   @doc false
   def handle_request(socket, buffer, timeouts, plug) do
     timeouts(request: request_timeout, headers: headers_timeout) = timeouts
-    {method, raw_path, version, buffer} = get_request(socket, buffer, request_timeout)
-    {req_headers, buffer} = get_headers(socket, version, buffer, headers_timeout)
-    conn = build_conn(socket, method, raw_path, version, req_headers, buffer)
+
+    {method, raw_path, version, buffer, req} = get_request(socket, buffer, request_timeout)
+    {req_headers, buffer, host, req} = get_headers(socket, version, buffer, headers_timeout, req)
+    conn = build_conn(socket, method, raw_path, req_headers, buffer, host, req)
+
     # TODO websock upgrade and stuff
     # TODO opts
-    conn = plug.call(conn, [])
+    # TODO try/catch?
+    %{adapter: {_, req}} = plug.call(conn, [])
 
-    # TODO
     receive do
       {:plug_conn, :sent} -> :ok
     after
       0 -> :ok
     end
 
-    case elem(conn.adapter, 1) do
-      Adapter.state(close?: true) -> :close
-      Adapter.state(close?: false, buffer: buffer) -> {:keepalive, buffer}
-    end
+    req
   end
 
   defp get_request(socket, buffer, timeout) when byte_size(buffer) <= 1_000 do
@@ -79,7 +78,7 @@ defmodule Serv.Acceptor do
         end
 
       {:ok, {:http_request, method, raw_path, version}, buffer} ->
-        {method, raw_path, version, buffer}
+        {method, raw_path, version, buffer, Adapter.req(version: version)}
 
       {:ok, {:http_error, _}, _} ->
         send_bad_request(socket)
@@ -98,30 +97,56 @@ defmodule Serv.Acceptor do
     exit(:normal)
   end
 
-  defp get_headers(socket, {1, _}, buffer, timeout) do
-    get_headers(socket, buffer, [], 0, timeout)
+  defp get_headers(socket, {1, _}, buffer, timeout, req) do
+    get_headers(socket, buffer, [], 0, timeout, nil, req)
   end
 
-  defp get_headers(_socket, {0, 9}, buffer, _timeout) do
-    {[], buffer}
+  defp get_headers(_socket, {0, 9}, buffer, _timeout, req) do
+    {[], buffer, req}
   end
 
-  defp get_headers(socket, buffer, headers, count, timeout)
+  defp get_headers(socket, buffer, headers, count, timeout, host, req)
        when byte_size(buffer) <= 1_000 and count < 100 do
     case :erlang.decode_packet(:httph_bin, buffer, []) do
-      {:ok, {:http_header, _, _, k, v}, buffer} ->
-        get_headers(socket, buffer, [{String.downcase(k), v} | headers], count + 1, timeout)
+      {:ok, {:http_header, _, k, k_bin, v}, buffer} ->
+        case k do
+          :"Transfer-Encoding" ->
+            v = String.downcase(v)
+            req = Adapter.req(req, transfer_encoding: v)
+            headers = [{"transfer-encoding", v} | headers]
+            get_headers(socket, buffer, headers, count + 1, timeout, host, req)
+
+          :Connection ->
+            v = String.downcase(v)
+            req = Adapter.req(req, connection: v)
+            headers = [{"connection", v} | headers]
+            get_headers(socket, buffer, headers, count + 1, timeout, host, req)
+
+          :Host ->
+            headers = [{"host", v} | headers]
+            get_headers(socket, buffer, headers, count + 1, timeout, v, req)
+
+          :"Content-Length" ->
+            i = String.to_integer(v)
+            req = Adapter.req(req, content_length: i)
+            headers = [{"content-length", v} | headers]
+            get_headers(socket, buffer, headers, count + 1, timeout, host, req)
+
+          _ ->
+            headers = [{header(k, k_bin), v} | headers]
+            get_headers(socket, buffer, headers, count + 1, timeout, host, req)
+        end
 
       {:ok, :http_eoh, buffer} ->
-        {headers, buffer}
+        {headers, buffer, host, req}
 
       {:ok, {:http_error, _}, buffer} ->
-        get_headers(socket, buffer, headers, count, timeout)
+        get_headers(socket, buffer, headers, count, timeout, host, req)
 
       {:more, _} ->
         case :socket.recv(socket, timeout) do
           {:ok, data} ->
-            get_headers(socket, buffer <> data, headers, count, timeout)
+            get_headers(socket, buffer <> data, headers, count, timeout, host, req)
 
           {:error, _reason} ->
             :socket.close(socket)
@@ -130,13 +155,13 @@ defmodule Serv.Acceptor do
     end
   end
 
-  defp get_headers(socket, _buffer, _headers, _count, _timeout) do
+  defp get_headers(socket, _buffer, _headers, _count, _timeout, _host, _req) do
     send_bad_request(socket)
     :socket.close(socket)
     exit(:normal)
   end
 
-  defp build_conn(socket, method, raw_path, version, req_headers, buffer) do
+  defp build_conn(socket, method, raw_path, req_headers, buffer, host, req) do
     path =
       case raw_path do
         {:abs_path, path} ->
@@ -155,22 +180,11 @@ defmodule Serv.Acceptor do
 
     # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
     {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
-
-    # TODO optimise (with benches)
-    host = keyfind(req_headers, "host")
-
-    state =
-      Adapter.state(
-        socket: socket,
-        version: version,
-        req_headers: req_headers,
-        buffer: buffer,
-        # TODO
-        close?: nil
-      )
+    req = Adapter.req(req, socket: socket, buffer: buffer, req_headers: req_headers)
+    # [buffer | req] ???
 
     %Plug.Conn{
-      adapter: {Adapter, state},
+      adapter: {Adapter, req},
       host: host,
       port: port,
       remote_ip: remote_ip,
@@ -188,14 +202,6 @@ defmodule Serv.Acceptor do
     :socket.send(socket, "HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request")
   end
 
-  @compile inline: [keyfind: 2]
-  defp keyfind(list, key) do
-    case List.keyfind(list, key, 0) do
-      {^key, value} -> value
-      nil = not_found -> not_found
-    end
-  end
-
   defp split_path_qs(path) do
     case :binary.split(path, "?") do
       [path] -> {path, split_path(path), ""}
@@ -211,4 +217,65 @@ defmodule Serv.Acceptor do
   defp clean_segments(["" | rest]), do: clean_segments(rest)
   defp clean_segments([segment | rest]), do: [segment | clean_segments(rest)]
   defp clean_segments([] = done), do: done
+
+  headers = [
+    :"Cache-Control",
+    # :Connection,
+    :Date,
+    :Pragma,
+    # :"Transfer-Encoding",
+    :Upgrade,
+    :Via,
+    :Accept,
+    :"Accept-Charset",
+    :"Accept-Encoding",
+    :"Accept-Language",
+    :Authorization,
+    :From,
+    # :Host,
+    :"If-Modified-Since",
+    :"If-Match",
+    :"If-None-Match",
+    :"If-Range",
+    :"If-Unmodified-Since",
+    :"Max-Forwards",
+    :"Proxy-Authorization",
+    :Range,
+    :Referer,
+    :"User-Agent",
+    :Age,
+    :Location,
+    :"Proxy-Authenticate",
+    :Public,
+    :"Retry-After",
+    :Server,
+    :Vary,
+    :Warning,
+    :"Www-Authenticate",
+    :Allow,
+    :"Content-Base",
+    :"Content-Encoding",
+    :"Content-Language",
+    # :"Content-Length",
+    :"Content-Location",
+    :"Content-Md5",
+    :"Content-Range",
+    :"Content-Type",
+    :Etag,
+    :Expires,
+    :"Last-Modified",
+    :"Accept-Ranges",
+    :"Set-Cookie",
+    :"Set-Cookie2",
+    :"X-Forwarded-For",
+    :Cookie,
+    :"Keep-Alive",
+    :"Proxy-Connection"
+  ]
+
+  for h <- headers do
+    defp header(unquote(h), _), do: unquote(String.downcase(to_string(h)))
+  end
+
+  defp header(_, h), do: String.downcase(h)
 end

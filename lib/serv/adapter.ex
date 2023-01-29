@@ -3,29 +3,38 @@ defmodule Serv.Adapter do
   @behaviour Plug.Conn.Adapter
 
   require Record
-  Record.defrecord(:state, [:socket, :version, :req_headers, :buffer, :close?])
+  # TODO remove :host
+  Record.defrecord(:req, [
+    :socket,
+    :buffer,
+    :transfer_encoding,
+    :content_length,
+    :connection,
+    :version,
+    :req_headers
+  ])
 
   @impl true
-  def send_resp(state, status, headers, body) do
-    state(socket: socket, version: version, req_headers: req_headers) = state
+  def send_resp(req, status, headers, body) do
+    req(socket: socket) = req
 
-    {connection, close?} = ensure_connection(version, headers, req_headers)
-    headers = [connection, ensure_content_length(headers, body) | headers]
-    response = [http_line(status), encode_headers(headers) | body]
+    response = [
+      http_line(status),
+      encode_headers([ensure_content_length(headers, body) | headers]) | body
+    ]
 
-    # TODO telemetry
     :socket.send(socket, response)
-    state = state(state, close?: close?)
-    {:ok, nil, state}
+
+    case List.keyfind(headers, "connection", 0) do
+      {_, connection} -> {:ok, nil, req(req, connection: connection)}
+      nil -> {:ok, nil, req}
+    end
   end
 
   @impl true
   @dialyzer {:no_improper_lists, send_file: 6}
-  def send_file(state, status, headers, file, offset, length) do
-    state(socket: socket, version: version, req_headers: req_headers) = state
-
-    {connection, close?} = ensure_connection(version, headers, req_headers)
-    headers = [connection | headers]
+  def send_file(req, status, headers, file, offset, length) do
+    req(socket: socket) = req
     response = [http_line(status) | encode_headers(headers)]
 
     with {:ok, fd} <- :file.open(file, [:read, :raw, :binary]) do
@@ -39,74 +48,184 @@ defmodule Serv.Adapter do
       end
     end
 
-    state = state(state, close?: close?)
-    {:ok, nil, state}
+    case List.keyfind(headers, "connection", 0) do
+      {_, connection} -> {:ok, nil, req(req, connection: connection)}
+      nil -> {:ok, nil, req}
+    end
   end
 
   @impl true
   @dialyzer {:no_improper_lists, send_chunked: 3}
-  def send_chunked(state, status, headers) do
-    state(socket: socket, version: version, req_headers: req_headers) = state
-
-    {connection, _close?} = ensure_connection(version, headers, req_headers)
-    headers = [{"transfer-encoding", "chunked"}, connection | headers]
-    response = [http_line(status) | encode_headers(headers)]
-
+  def send_chunked(req, status, headers) do
+    req(socket: socket) = req
+    response = [http_line(status) | encode_headers([{"transfer-encoding", "chunked"} | headers])]
     :socket.send(socket, response)
 
-    # TODO
-    state = state(state, close?: false)
-    {:ok, nil, state}
+    case List.keyfind(headers, "connection", 0) do
+      {_, connection} -> {:ok, nil, req(req, connection: connection)}
+      nil -> {:ok, nil, req}
+    end
   end
 
   @impl true
   @dialyzer {:no_improper_lists, chunk: 2}
-  def chunk(state, body) do
+  def chunk(req, body) do
     # TODO head? -> no response
-    state(socket: socket) = state
-    length = IO.iodata_length(body)
-    :socket.send(socket, [Integer.to_string(length, 16), "\r\n", body | "\r\n"])
+    req(socket: socket) = req
+    length = body |> IO.iodata_length() |> Integer.to_string(16)
+    :socket.send(socket, [length, "\r\n", body | "\r\n"])
   end
 
-  # TODO stream
   @impl true
-  def read_req_body(state, opts) do
-    state(socket: socket, req_headers: req_headers, buffer: buffer) = state
+  def read_req_body(req, opts) do
+    req(
+      socket: socket,
+      buffer: buffer,
+      content_length: content_length,
+      transfer_encoding: transfer_encoding,
+      req_headers: req_headers
+    ) = req
 
-    case List.keyfind(req_headers, "content-length", 0) do
-      nil ->
-        case List.keyfind(req_headers, "transfer-encoding", 0) do
-          nil ->
-            {:ok, <<>>, state}
+    want_length = opts[:length] || 8_000_000
+    read_length = opts[:read_length] || 1_000_000
+    read_timeout = opts[:read_timeout] || 15_000
 
-          {_, encoding} ->
-            case String.downcase(encoding) do
-              # TODO
-              "chunked" -> {:error, "chunked requests are not supported"}
-              other -> {:error, "unsupported transfer-encoding method: #{other}"}
+    # TODO use req.state, not buffer type (after the first read_req_body call buffer becomes a list)
+    case buffer do
+      bin when is_binary(bin) -> maybe_send_continue(socket, req_headers)
+      _ -> :ok
+    end
+
+    case content_length do
+      0 ->
+        {:ok, <<>>, req}
+
+      _ ->
+        recv_result =
+          case transfer_encoding do
+            # TODO
+            # "chunked" ->
+            #   case unchunk(buffer) do
+            #     {:ok, _data, _rest} = done ->
+            #       done
+
+            #     {:more, data, buffer} ->
+            #       recv_chunked(
+            #         socket,
+            #         rest,
+            #         byte_size(data),
+            #         want_length,
+            #         read_length,
+            #         read_timeout,
+            #         data
+            #       )
+            #   end
+
+            nil ->
+              recv_until(
+                socket,
+                buffer,
+                byte_size(buffer),
+                want_length,
+                read_length,
+                read_timeout
+              )
+
+            _other ->
+              {:error, :unsupported_transfer_encoding}
+          end
+
+        case recv_result do
+          {:ok, body, buffer} ->
+            case content_length - want_length do
+              left when left > 0 -> {:more, body, req(req, buffer: buffer, content_length: left)}
+              0 -> {:ok, body, req(req, buffer: buffer, content_length: 0)}
             end
+
+          {:error, {reason, _data}} ->
+            {:error, reason}
+
+          {:error, _reason} = error ->
+            error
+        end
+    end
+  end
+
+  # def recv_chunked(socket, data, data_size, want_length, read_length, read_timeout) do
+  #   case want_length - data_size do
+  #     0 -> {:ok, IO.iodata_to_binary(data), []}
+  #   end
+  # end
+
+  # chunk_headers = [
+  #   {quote(do: <<size, "\r\n", chunk::size()-bytes, "\r\n">>)}
+  # ]
+
+  # defp unchunk(<<a, "\r\n", rest>>, size, acc) do
+  #   case rest do
+  #     <<chunk::size(size)-bytes, "\r\n"::bytes, rest::bytes>> ->
+  #       unchunk(rest, 0, [acc | chunk])
+  #   end
+  # end
+
+  # defp unchunk(<<h, rest>>, size, acc) do
+  #   case h do
+  #     h >= ?0 and h <= ?9 -> unchunk(rest, (size <<< 4) + h - ?0, acc)
+  #     h >= ?A and h <= ?F -> unchunk(rest, (size <<< 4) + h - ?A + 0xA, acc)
+  #     h >= ?a and h <= ?f -> unchunk(rest, (size <<< 4) + h - ?a + 0xA, acc)
+  #   end
+  # end
+
+  @dialyzer {:no_improper_lists, recv_until: 6}
+  defp recv_until(socket, buffer, buffer_size, want_length, read_length, read_timeout) do
+    case want_length - buffer_size do
+      0 ->
+        {:ok, IO.iodata_to_binary(buffer), []}
+
+      n when n > 0 and n <= read_length ->
+        case :socket.recv(socket, n, read_timeout) do
+          {:ok, data} -> {:ok, IO.iodata_to_binary([buffer | data]), []}
+          {:error, _reason} = error -> error
         end
 
-      {_, content_length} ->
-        content_length = String.to_integer(content_length)
-        maybe_send_continue(socket, req_headers)
+      n when n > 0 ->
+        case :socket.recv(socket, read_length, read_timeout) do
+          {:ok, data} ->
+            recv_until(
+              socket,
+              [buffer | data],
+              buffer_size + read_length,
+              want_length,
+              read_length,
+              read_timeout
+            )
 
-        case content_length - byte_size(buffer) do
-          0 ->
-            {:ok, buffer, state(state, buffer: <<>>)}
-
-          n when n > 0 ->
-            timeout = Keyword.get(opts, :read_timeout, :timer.seconds(15))
-
-            case :socket.recv(socket, n, timeout) do
-              {:ok, data} -> {:ok, buffer <> data, state(state, buffer: <<>>)}
-              {:error, _reason} = error -> error
-            end
-
-          _ ->
-            <<body::size(content_length)-bytes, rest::bytes>> = buffer
-            {:ok, body, state(state, buffer: rest)}
+          {:error, _reason} = error ->
+            error
         end
+
+      _ ->
+        case buffer do
+          <<body::size(want_length)-bytes, buffer::bytes>> -> {:ok, body, [buffer]}
+          _ -> split_iolist(buffer, want_length)
+        end
+    end
+  end
+
+  @dialyzer {:no_improper_lists, split_iolist: 3}
+  defp split_iolist([data | rest], want_length, acc \\ []) do
+    byte_size = byte_size(data)
+
+    case want_length - byte_size do
+      0 ->
+        {:ok, IO.iodata_to_binary([acc | data]), rest}
+
+      n when n > 0 ->
+        split_iolist(rest, n, [acc | data])
+
+      _ ->
+        <<d1::size(want_length)-bytes, d2::bytes>> = data
+        {:ok, IO.iodata_to_binary([acc | d1]), [rest | d2]}
     end
   end
 
@@ -122,8 +241,8 @@ defmodule Serv.Adapter do
 
   @impl true
   @dialyzer {:no_improper_lists, upgrade: 3}
-  def upgrade(state, :websocket, _opts) do
-    state(socket: socket, req_headers: req_headers) = state
+  def upgrade(req, :websocket, _opts) do
+    req(socket: socket, req_headers: req_headers) = req
 
     with {_, version} <- List.keyfind(req_headers, "sec-websocket-version", 0),
          version = String.to_integer(version),
@@ -140,11 +259,12 @@ defmodule Serv.Adapter do
       response = [http_line(101) | encode_headers(headers)]
 
       with :ok <- :socket.send(socket, response) do
-        {:ok, state}
+        {:ok, req}
       end
     else
       _ ->
-        {:error, :not_supported}
+        # TODO proper error
+        {:error, :failed_websocket_upgrade}
     end
   end
 
@@ -153,43 +273,18 @@ defmodule Serv.Adapter do
   end
 
   @impl true
-  def get_peer_data(state(socket: socket)) do
+  def get_peer_data(req(socket: socket)) do
     {:ok, {address, port}} = :inet.peername(socket)
     %{address: address, port: port, ssl_cert: nil}
   end
 
   @impl true
-  def get_http_protocol(state(version: version)) do
+  def get_http_protocol(req(version: version)) do
     case version do
       {1, 1} -> :"HTTP/1.1"
       {1, 0} -> :"HTTP/1"
       {0, 9} -> :"HTTP/0.9"
     end
-  end
-
-  defp ensure_connection(version, resp_headers, req_headers) do
-    case List.keyfind(resp_headers, "connection", 0) do
-      nil -> connection(version, req_headers)
-      {_, connection} -> {[], String.downcase(connection) == "close"}
-    end
-  end
-
-  defp connection({1, 1}, req_headers) do
-    case List.keyfind(req_headers, "connection", 0) do
-      nil -> {[], false}
-      {_, connection} = h -> {h, String.downcase(connection) == "close"}
-    end
-  end
-
-  defp connection({1, 0}, req_headers) do
-    case List.keyfind(req_headers, "connection", 0) do
-      nil -> {[], true}
-      {_, connection} = h -> {h, String.downcase(connection) == "close"}
-    end
-  end
-
-  defp connection({0, 9}, _req_headers) do
-    {[], true}
   end
 
   defp ensure_content_length(headers, body) do
@@ -209,7 +304,6 @@ defmodule Serv.Adapter do
 
   defp encode_value(i) when is_integer(i), do: Integer.to_string(i)
   defp encode_value(b) when is_binary(b), do: b
-  defp encode_value(l) when is_list(l), do: List.to_string(l)
 
   statuses = [
     {200, "200 OK"},

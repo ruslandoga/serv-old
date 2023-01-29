@@ -1,8 +1,7 @@
-- [ ] streaming read body
 - [ ] telemetry
 - [ ] tests
+- [ ] websock
+- [ ] transfer-encoding: chunked
 - [ ] pico
 - [ ] benches
-- [ ] websock
-- [ ] tls?
 - [ ] drain connections
