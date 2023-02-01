@@ -15,7 +15,8 @@ defmodule Serv.ConnCase do
   end
 
   def request(conn, verb, path, headers \\ [], body \\ "") do
-    Mint.HTTP.request(conn, verb, path, headers, body)
+    {:ok, conn, _ref} = Mint.HTTP.request(conn, verb, path, headers, body)
+    recv(conn)
   end
 
   def recv(conn, acc \\ []) do

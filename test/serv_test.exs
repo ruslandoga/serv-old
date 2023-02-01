@@ -21,8 +21,7 @@ defmodule ServTest do
     setup [:started, :connected]
 
     test "it works", %{conn: conn} do
-      {:ok, conn, _ref} = request(conn, "GET", "/")
-      assert [200, headers | data] = recv(conn)
+      assert [200, headers | data] = request(conn, "GET", "/")
 
       assert headers == [
                {"content-length", "3"},
