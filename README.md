@@ -1,5 +1,5 @@
-- [ ] telemetry
 - [ ] tests
+- [ ] telemetry
 - [ ] websock
 - [ ] transfer-encoding: chunked
 - [ ] pico
